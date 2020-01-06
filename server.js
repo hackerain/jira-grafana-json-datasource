@@ -60,7 +60,7 @@ app.get('/',
 app.get('/test-jira',
   passport.authenticate(authenticationStrategy, { session: false }),
   (httpReq, httpRes) => {
-    
+
     jira.myself.getMyself().then((jiraRes) => {
       httpRes.json(jiraRes)
     }).catch((jiraErr) => {
@@ -71,30 +71,39 @@ app.get('/test-jira',
 
 
 // Used by the find metric options on the query tab in panels.
-app.all('/search', 
+app.all('/search',
   passport.authenticate(authenticationStrategy, { session: false }),
   (httpReq, httpRes) => {
 
+  let result = [
+      {text: 'ALL',               value: "jsd:all"},
+      {text: 'All Organizations', value: "jsd:organizations:all"},
+      {text: 'All Agents',        value: "jsd:agents:all"},
+      {text: 'One Organization',  value: "jsd:organizations:one"},
+      {text: 'One Agent',         value: "jsd:agents:one"}
+  ]
+
   // The JiraClient doesn't have any way to list filters so we need to do a custom query
   jira.makeRequest({
-    uri: jira.buildURL('/filter')
+    uri: jira.buildURL('/filter/favourite')
   }).then((jiraRes) => {
-  
-    let result = jiraRes.map(filter => {
-      return {
-        text: filter.name,
-        value: filter.id
-      }
+
+    jiraRes.map(filter => {
+      result.push({
+        text: "filter: " + filter.name,
+        value: filter.jql,
+      })
     })
 
+    console.log(result)
     httpRes.json(result)
   })
-  
+
 })
 
 
 // Should return metrics based on input.
-app.post('/query', 
+app.post('/query',
   passport.authenticate(authenticationStrategy, { session: false }),
   (httpReq, httpRes) => {
 
@@ -106,24 +115,53 @@ app.post('/query',
 
   let p = httpReq.body.targets.map(target => {
 
-    // Default jql with time range
-    let jql = [`created >= "${from}"`, `created <= "${to}"`]
+    let jql = []
 
-    // Additional jql for targets
-    if ( target.target ) {
-      jql.push(`filter = "${target.target}"`)
+    // Default jql with time range
+    if ( target.data && target.data.timerange_type == 'updated' ) {
+      jql = [`updated >= "${from}"`, `updated <= "${to}"`]
+    } else {
+      jql = [`created >= "${from}"`, `created <= "${to}"`]
     }
 
+    console.log(target.data)
+
+    // Additional jql for targets
+    if ( target.target && target.target.startsWith('filter') ) {
+      jql.push(`${target.target}`)
+    } else if ( target.target && target.target == "jsd:organizations:one" ){
+      if (target.data && target.data.organization ) {
+        jql.push("Organizations = " + target.data.organization)
+      }
+    }
+
+    console.log(jql)
+
     return jira.search.search({
-      jql: jql.join(' AND ')
+      jql: jql.join(' AND '),
+      maxResults: 10000,
+      fields: ['*all'],
+      timeout: 60000
     }).then((jiraRes) => {
 
-      if (target.type == 'timeserie') {
-        
-        let datapoints = jiraRes.issues.map(issue => {
-          timestamp = Math.floor(new Date(issue.fields.created))
-          return [1, timestamp]
+      if (target.type == 'timeseries') {
+
+        let imap = {}
+        let datapoints = []
+
+        jiraRes.issues.map(issue => {
+          created_date = issue.fields.created.split('T')[0]
+          if ( created_date in imap ) {
+            imap[created_date]++
+          } else {
+            imap[created_date] = 1
+          }
         })
+
+        for (var key in imap) {
+          datapoints.push([imap[key], Math.floor(new Date(key))])
+        }
+        datapoints.sort( function (a, b) {return a[1] - b[1]} )
 
         result.push({
           target: target.target,
@@ -133,30 +171,124 @@ app.post('/query',
       }
       else if (target.type == 'table') {
 
-        let rows = jiraRes.issues.map(issue => {
-          return [
-            issue.key,
-            issue.fields.summary,
-            issue.fields.assignee ? issue.fields.assignee.displayName : '',
-            issue.fields.status ? issue.fields.status.name : '',
-            issue.fields.created
-          ]
-        })
+        let imap = new Map() // store agent to issues
+        let jmap = new Map() // store agent to worklogs
+        let ijmap =  new Map() // like {a: [1,2], b: [3,4]}
+        let rows = []
 
-        result.push({
-          columns: [
-            { text: 'Key', 'type': 'string' },
-            { text: 'Summary', 'type': 'string' },
-            { text: 'Assignee', 'type': 'string' },
-            { text: 'Status', 'type': 'string' },
-            { text: 'Created', 'type': 'time' }
-          ],
-          type: 'table',
-          rows: rows
-        })
+        if ( target.target == 'jsd:organizations:all' ) {
+          jiraRes.issues.map(issue => {
+            let org = issue.fields.customfield_10002.length != 0 ? issue.fields.customfield_10002[0].name : 'Unknown'
+
+            let logwork = 0
+            issue.fields.worklog.worklogs.forEach((item) => {
+              logwork += item.timeSpentSeconds
+            })
+
+            if ( imap.has(org) ) {
+              imap.set(org, [imap.get(org)[0]+1, imap.get(org)[1]+logwork])
+            } else {
+              imap.set(org, [1, logwork])
+            }
+
+          })
+
+          imap.forEach((value, key) => {
+            rows.push([key, value[0], value[1] / 3600 / 8])
+          })
+
+          result.push({
+            columns: [
+              { text: '项目名称', 'type': 'string' },
+              { text: '工单数', 'type': 'string' },
+              { text: '人天数', 'type': 'string' }
+            ],
+            type: 'table',
+            rows: rows
+          })
+        } else if ( target.target == 'jsd:agents:all' ) {
+          jiraRes.issues.map(issue => {
+            let assignee = issue.fields.assignee ? issue.fields.assignee.displayName : 'Unassigned'
+
+            let logwork = 0
+            issue.fields.worklog.worklogs.forEach((item) => {
+              logwork += item.timeSpentSeconds
+            })
+
+            if ( imap.has(assignee) ) {
+              imap.set(assignee, [imap.get(assignee)[0]+1, imap.get(assignee)[1]+logwork])
+            } else {
+              imap.set(assignee, [1, logwork])
+            }
+
+          })
+
+          imap.forEach((value, key) => {
+            rows.push([key, value[0], value[1] / 3600 / 8])
+          })
+
+          result.push({
+            columns: [
+              { text: '人员', 'type': 'string' },
+              { text: '工单数', 'type': 'string' },
+              { text: '人天数', 'type': 'string' }
+            ],
+            type: 'table',
+            rows: rows
+          })
+
+        } else if ( target.target == 'jsd:organizations:one' ) {
+          jiraRes.issues.map(issue => {
+            let assignee = issue.fields.assignee ? issue.fields.assignee.displayName : 'Unassigned'
+            if ( imap.has(assignee) ) {
+              imap.set(assignee, imap.get(assignee)+1)
+            } else {
+              imap.set(assignee, 1)
+            }
+
+            issue.fields.worklog.worklogs.forEach((item) => {
+              let author = item.author.displayName
+              let logwork = item.timeSpentSeconds
+              if ( jmap.has(author) ) {
+                jmap.set(author, jmap.get(author)+logwork)
+              } else {
+                jmap.set(author, logwork)
+              }
+            })
+          })
+
+          // merge {a: 1} and {a: 2, b:1} to {a: [1, 2], b: [0, 1]}
+          // merge imap and jmap to ijmap
+          imap.forEach((issues, assignee) => {
+            let logwork = jmap.get(assignee) ? jmap.get(assignee) : 0
+            ijmap.set(assignee, [issues, logwork ])
+          })
+          jmap.forEach((logwork, author) => {
+            let issues = imap.get(author) ? imap.get(author) : 0
+            ijmap.set(author, [issues, logwork])
+          })
+
+          console.log(ijmap)
+
+          ijmap.forEach((value, key) => {
+            rows.push([key, value[0], value[1] / 3600 / 8])
+          })
+
+          console.log(rows)
+
+          result.push({
+            columns: [
+              { text: '人员', 'type': 'string' },
+              { text: '工单数', 'type': 'string' },
+              { text: '人天数', 'type': 'string' }
+            ],
+            type: 'table',
+            rows: rows
+          })
+
+        } else if ( target.target == 'jsd:agents:one' ) {
+        }
       }
-
-
     })
   })
 
@@ -164,7 +296,7 @@ app.post('/query',
   Promise.all(p).then(() => {
     httpRes.json(result)
   })
-  
+
 })
 
 
