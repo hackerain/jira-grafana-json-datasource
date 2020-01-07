@@ -76,11 +76,12 @@ app.all('/search',
   (httpReq, httpRes) => {
 
   let result = [
-      {text: 'ALL',               value: "jsd:all"},
-      {text: 'All Organizations', value: "jsd:organizations:all"},
-      {text: 'All Agents',        value: "jsd:agents:all"},
-      {text: 'One Organization',  value: "jsd:organizations:one"},
-      {text: 'One Agent',         value: "jsd:agents:one"}
+      {text: 'ALL Tickets Updated',   value: "jsd:tickets:updated"},
+      {text: 'ALL Tickets Created',   value: "jsd:tickets:created"},
+      {text: 'All Organizations',     value: "jsd:organizations:all"},
+      {text: 'All Agents',            value: "jsd:agents:all"},
+      {text: 'One Organization',      value: "jsd:organizations:one"},
+      {text: 'One Agent',             value: "jsd:agents:one"}
   ]
 
   // The JiraClient doesn't have any way to list filters so we need to do a custom query
@@ -124,10 +125,10 @@ app.post('/query',
       jql = [`created >= "${from}"`, `created <= "${to}"`]
     }
 
-    console.log(target.data)
+    console.log("target.data: " + target.data)
 
     // Additional jql for targets
-    if ( target.target && target.target.startsWith('filter') ) {
+    if ( target.target && !target.target.startsWith('jsd') ) {
       jql.push(`${target.target}`)
     } else if ( target.target && target.target == "jsd:organizations:one" ){
       if (target.data && target.data.organization ) {
@@ -135,7 +136,7 @@ app.post('/query',
       }
     }
 
-    console.log(jql)
+    console.log("jql: " + jql)
 
     return jira.search.search({
       jql: jql.join(' AND '),
@@ -150,11 +151,15 @@ app.post('/query',
         let datapoints = []
 
         jiraRes.issues.map(issue => {
-          created_date = issue.fields.created.split('T')[0]
-          if ( created_date in imap ) {
-            imap[created_date]++
+          if (target.data && target.data.timerange_type == 'updated'){
+            date = issue.fields.updated.split('T')[0]
           } else {
-            imap[created_date] = 1
+            date = issue.fields.created.split('T')[0]
+          }
+          if ( date in imap ) {
+            imap[date]++
+          } else {
+            imap[date] = 1
           }
         })
 
@@ -206,38 +211,7 @@ app.post('/query',
             type: 'table',
             rows: rows
           })
-        } else if ( target.target == 'jsd:agents:all' ) {
-          jiraRes.issues.map(issue => {
-            let assignee = issue.fields.assignee ? issue.fields.assignee.displayName : 'Unassigned'
-
-            let logwork = 0
-            issue.fields.worklog.worklogs.forEach((item) => {
-              logwork += item.timeSpentSeconds
-            })
-
-            if ( imap.has(assignee) ) {
-              imap.set(assignee, [imap.get(assignee)[0]+1, imap.get(assignee)[1]+logwork])
-            } else {
-              imap.set(assignee, [1, logwork])
-            }
-
-          })
-
-          imap.forEach((value, key) => {
-            rows.push([key, value[0], value[1] / 3600 / 8])
-          })
-
-          result.push({
-            columns: [
-              { text: '人员', 'type': 'string' },
-              { text: '工单数', 'type': 'string' },
-              { text: '人天数', 'type': 'string' }
-            ],
-            type: 'table',
-            rows: rows
-          })
-
-        } else if ( target.target == 'jsd:organizations:one' ) {
+        } else if ( target.target == 'jsd:organizations:one' || target.target == 'jsd:agents:all' ) {
           jiraRes.issues.map(issue => {
             let assignee = issue.fields.assignee ? issue.fields.assignee.displayName : 'Unassigned'
             if ( imap.has(assignee) ) {
@@ -287,6 +261,46 @@ app.post('/query',
           })
 
         } else if ( target.target == 'jsd:agents:one' ) {
+          let agent = target.data.agent ? target.data.agent : "Unknown"
+
+          jiraRes.issues.map(issue => {
+            let org = issue.fields.customfield_10002.length != 0 ? issue.fields.customfield_10002[0].name : 'Unknown'
+            let assignee = issue.fields.assignee ? issue.fields.assignee.displayName : 'Unassigned'
+
+            let count = assignee == agent ? 1 : 0
+
+            let logwork = 0
+            issue.fields.worklog.worklogs.forEach((item) => {
+              let author = item.author.displayName
+              if ( agent == author ) {
+                logwork += item.timeSpentSeconds
+              }
+            })
+
+            if ( logwork == 0 && count == 0 ) {
+              return
+            }
+
+            if ( imap.has(org) ) {
+              imap.set(org, [imap.get(org)[0]+count, imap.get(org)[1]+logwork])
+            } else {
+              imap.set(org, [count, logwork])
+            }
+          })
+
+          imap.forEach((value, key) => {
+            rows.push([key, value[0], value[1] / 3600 / 8])
+          })
+
+          result.push({
+            columns: [
+              { text: '项目名称', 'type': 'string' },
+              { text: '工单数', 'type': 'string' },
+              { text: '人天数', 'type': 'string' }
+            ],
+            type: 'table',
+            rows: rows
+          })
         }
       }
     })
