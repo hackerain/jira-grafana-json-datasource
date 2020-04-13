@@ -6,6 +6,7 @@ const morgan = require('morgan')
 const passport = require('passport')
 const BasicStrategy = require('passport-http').BasicStrategy
 const AnonymousStrategy = require('passport-anonymous')
+const Excel = require('exceljs')
 
 
 // Instantiate our Jira client
@@ -67,7 +68,7 @@ app.get('/test-jira',
       httpRes.json(JSON.parse(jiraErr))
     })
 
-  })
+})
 
 
 // Used by the find metric options on the query tab in panels.
@@ -79,6 +80,7 @@ app.all('/search',
       {text: 'ALL Tickets Updated',   value: "jsd:tickets:updated"},
       {text: 'ALL Tickets Created',   value: "jsd:tickets:created"},
       {text: 'All Organizations',     value: "jsd:organizations:all"},
+      {text: 'All Organizations Full',     value: "jsd:organizations:all:full"},
       {text: 'All Agents',            value: "jsd:agents:all"},
       {text: 'One Organization',      value: "jsd:organizations:one"},
       {text: 'One Agent',             value: "jsd:agents:one"}
@@ -176,8 +178,10 @@ app.post('/query',
       }
       else if (target.type == 'table') {
 
+        let agents = new Map()
         let imap = new Map() // store agent to issues
         let jmap = new Map() // store agent to worklogs
+        let omap = new Map() // store org
         let ijmap =  new Map() // like {a: [1,2], b: [3,4]}
         let rows = []
 
@@ -211,9 +215,143 @@ app.post('/query',
             type: 'table',
             rows: rows
           })
+        } else if ( target.target == 'jsd:organizations:all:full' ) {
+          jiraRes.issues.map(issue => {
+            let org = issue.fields.customfield_10002.length != 0 ? issue.fields.customfield_10002[0].name : 'Unknown'
+
+            let logwork = 0
+            issue.fields.worklog.worklogs.forEach((item) => {
+              logwork += item.timeSpentSeconds
+            })
+
+            if ( imap.has(org) ) {
+              imap.set(org, [imap.get(org)[0]+1, imap.get(org)[1]+logwork])
+            } else {
+              imap.set(org, [1, logwork])
+            }
+
+            if ( ! omap.has(org) ) {
+              omap.set(org, new Map())
+            }
+
+            let amap = omap.get(org)
+
+            // issue
+            let assignee = issue.fields.assignee ? issue.fields.assignee.name : 'Unassigned'
+            if ( ! amap.get(assignee) ) {
+              let displayName = issue.fields.assignee ? issue.fields.assignee.displayName : 'Unassigned'
+              agents.set(assignee, displayName)
+              amap.set(assignee, [0, 0])
+            }
+            let cell = amap.get(assignee)
+            amap.set(assignee, [cell[0]+1, cell[1]])
+
+            // logwork
+            issue.fields.worklog.worklogs.forEach((item) => {
+              let author = item.author.name
+              let logwork = item.timeSpentSeconds
+              if ( ! amap.get(author) ) {
+                let displayName = item.author ? item.author.displayName : 'Unassigned'
+                agents.set(author, displayName)
+                amap.set(author, [0, 0])
+              }
+              let cell = amap.get(author)
+              amap.set(author, [cell[0], cell[1]+logwork])
+            })
+          })
+
+          //set other agents into amap
+          agents.forEach((name, key) => {
+            omap.forEach((amap, org) => {
+              if ( ! amap.has(key) ) {
+                amap.set(key, [0, 0])
+              }
+            })
+          })
+
+          //sort
+          omap.forEach((amap, org) => {
+            omap.set(org, new Map([...amap.entries()].sort()))
+          })
+          agents = new Map([...agents.entries()].sort())
+
+          // there are three types:
+          // * both, including logwork and issue, the default
+          // * logwork, only include logwork
+          // * issue, only include issue
+
+          let type = target.data ? target.data.type : "both"
+
+          if (type == 'both') {
+            imap.forEach((value, key) => {
+              let row = [key, value[0], value[1] / 3600 / 8]
+              let amap = omap.get(key)
+              if ( amap ) {
+                amap.forEach((cell, agent) => {
+                  row.push(cell[0], cell[1] / 3600 / 8)
+                })
+              }
+              rows.push(row)
+            })
+
+            columns = [
+              { text: '项目名称', 'type': 'string' },
+              { text: '工单数', 'type': 'string' },
+              { text: '人天数', 'type': 'string' }
+            ]
+            agents.forEach((name, key) => {
+              columns.push({text: name+"-工单", 'type': 'string'},
+                          {text: name+"-人天", 'type': 'string'})
+            })
+          } else if (type == 'logwork') {
+            imap.forEach((value, key) => {
+              let row = [key, value[1] / 3600 / 8]
+              let amap = omap.get(key)
+              if ( amap ) {
+                amap.forEach((cell, agent) => {
+                  row.push(cell[1] / 3600 / 8)
+                })
+              }
+              rows.push(row)
+            })
+
+            columns = [
+              { text: '项目名称', 'type': 'string' },
+              { text: '人天数', 'type': 'string' }
+            ]
+            agents.forEach((name, key) => {
+              columns.push({text: name, 'type': 'string'})
+            })
+          } else if (type == 'issue') {
+            imap.forEach((value, key) => {
+              let row = [key, value[0]]
+              let amap = omap.get(key)
+              if ( amap ) {
+                amap.forEach((cell, agent) => {
+                  row.push(cell[0])
+                })
+              }
+              rows.push(row)
+            })
+
+            columns = [
+              { text: '项目名称', 'type': 'string' },
+              { text: '工单数', 'type': 'string' }
+            ]
+            agents.forEach((name, key) => {
+              columns.push({text: name, 'type': 'string'})
+            })
+          }
+
+          result.push({
+            columns: columns,
+            type: 'table',
+            rows: rows
+          })
         } else if ( target.target == 'jsd:organizations:one' || target.target == 'jsd:agents:all' ) {
           jiraRes.issues.map(issue => {
-            let assignee = issue.fields.assignee ? issue.fields.assignee.displayName : 'Unassigned'
+            let assignee = issue.fields.assignee ? issue.fields.assignee.name : 'Unassigned'
+            console.log("xxxx assignee: " + assignee + ", ticket:" + issue.key)
             if ( imap.has(assignee) ) {
               imap.set(assignee, imap.get(assignee)+1)
             } else {
@@ -221,7 +359,7 @@ app.post('/query',
             }
 
             issue.fields.worklog.worklogs.forEach((item) => {
-              let author = item.author.displayName
+              let author = item.author.name
               let logwork = item.timeSpentSeconds
               if ( jmap.has(author) ) {
                 jmap.set(author, jmap.get(author)+logwork)
@@ -265,13 +403,13 @@ app.post('/query',
 
           jiraRes.issues.map(issue => {
             let org = issue.fields.customfield_10002.length != 0 ? issue.fields.customfield_10002[0].name : 'Unknown'
-            let assignee = issue.fields.assignee ? issue.fields.assignee.displayName : 'Unassigned'
+            let assignee = issue.fields.assignee ? issue.fields.assignee.name : 'Unassigned'
 
             let count = assignee == agent ? 1 : 0
 
             let logwork = 0
             issue.fields.worklog.worklogs.forEach((item) => {
-              let author = item.author.displayName
+              let author = item.author.name
               if ( agent == author ) {
                 logwork += item.timeSpentSeconds
               }
@@ -314,7 +452,20 @@ app.post('/query',
 })
 
 
-app.listen(3000)
+app.get('/download',
+  (httpReq, httpRes) => {
+    httpRes.writeHead(200, {
+    'Content-Disposition': 'attachment; filename="file.xlsx"',
+    'Transfer-Encoding': 'chunked',
+    'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+    })
+    var workbook = new Excel.stream.xlsx.WorkbookWriter({stream: httpRes})
+    var worksheet = workbook.addWorksheet('Sheet1')
+    worksheet.addRow(['foo', 'bar']).commit()
+    worksheet.commit()
+    workbook.commit()
+})
 
+app.listen(3000)
 
 console.log('Server is listening to port 3000')
