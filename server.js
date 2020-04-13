@@ -344,7 +344,7 @@ app.post('/query',
           }
 
           //total
-          if (rows) {
+          if (rows.length) {
             total = ["总计"]
             c = rows[0].length
             for (var i = 1; i<c; i++){
