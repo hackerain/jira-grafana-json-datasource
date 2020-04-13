@@ -301,7 +301,7 @@ app.post('/query',
             ]
             agents.forEach((name, key) => {
               columns.push({text: name+"-工单", 'type': 'string'},
-                          {text: name+"-人天", 'type': 'string'})
+                           {text: name+"-人天", 'type': 'string'})
             })
           } else if (type == 'logwork') {
             imap.forEach((value, key) => {
@@ -341,6 +341,20 @@ app.post('/query',
             agents.forEach((name, key) => {
               columns.push({text: name, 'type': 'string'})
             })
+          }
+
+          //total
+          if (rows) {
+            total = ["总计"]
+            c = rows[0].length
+            for (var i = 1; i<c; i++){
+              a = 0
+              rows.forEach((row) => {
+                a = a + row[i]
+              })
+              total.push(a)
+            }
+            rows.push(total)
           }
 
           result.push({
